@@ -6,4 +6,5 @@ The CNN policy with an auxiliary head is currently missing, so you can
 only use the `AuxMlpPolicy`.
 
 To initialize the policy with the paper's initialization values,
-uncomment the code for `init_weights` in <./ppg/aux_ac_policy.py>.
+uncomment the code for `init_weights` in
+[./ppg/aux_ac_policy.py](./ppg/aux_ac_policy.py).
