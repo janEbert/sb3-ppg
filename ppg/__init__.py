@@ -1,2 +1,2 @@
-from .policies import CnnPolicy, AuxMlpPolicy
+from .policies import AuxMlpPolicy
 from .ppg import PPG
