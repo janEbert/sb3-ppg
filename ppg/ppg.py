@@ -42,8 +42,9 @@ class PPG(PPO):
         See https://github.com/pytorch/pytorch/issues/29372
     :param batch_size: Minibatch size
     :param aux_batch_size: Auxiliary minibatch size
-    :param n_phases: Number of optimization phases (most outer loop)
+    :param n_policy_iters: Number of policy phase optimization iterations
     :param n_epochs: Number of epochs when optimizing the surrogate loss
+        (policy and value epochs are always the same)
     :param n_aux_epochs: Number of epochs for the auxiliary phase
     :param gamma: Discount factor
     :param gae_lambda: Factor for trade-off of bias vs variance for
@@ -100,8 +101,8 @@ class PPG(PPO):
         n_steps: int = 2048,  # 256 in paper
         batch_size: Optional[int] = 64,  # 8 in paper
         aux_batch_size: Optional[int] = 32,  # 4 in paper
-        n_phases: int = 1,
-        n_epochs: int = 10,  # 32 in paper
+        n_policy_iters: int = 10,  # 32 in paper
+        n_epochs: int = 1,
         n_aux_epochs: int = 2,  # 6 in paper
         gamma: float = 0.99,  # 0.999 in paper
         gae_lambda: float = 0.95,
@@ -156,7 +157,8 @@ class PPG(PPO):
         else:
             self.aux_learning_rate = aux_learning_rate
         self.aux_batch_size = aux_batch_size
-        self.n_phases = n_phases
+        self.n_policy_iters = n_policy_iters
+        self._curr_n_policy_iters = 0
         self.n_aux_epochs = n_aux_epochs
         self.beta_clone = beta_clone
         self.vf_true_coef = vf_true_coef
@@ -183,8 +185,8 @@ class PPG(PPO):
         self.n_steps = 256
         self.batch_size = 8
         self.aux_batch_size = 4
-        self.n_phases = 1
-        self.n_epochs = 32
+        self.n_policy_iters = 32
+        self.n_epochs = 1
         self.n_aux_epochs = 6
         self.gamma = 0.999
         self.gae_lambda = 0.95
@@ -224,87 +226,92 @@ class PPG(PPO):
         """
         Update policy using the currently gathered rollout buffer.
         """
-        for phase in range(self.n_phases):
-            super(PPG, self).train()
+        super(PPG, self).train()
 
-            indices = np.arange(self.rollout_buffer.buffer_size
-                                * self.rollout_buffer.n_envs)
-            # In the paper, these are re-calculated after updating the policy
-            old_pds = np.empty(self.rollout_buffer.observations.shape[0],
-                               dtype=object)
+        self._curr_n_policy_iters += 1
+        if self._curr_n_policy_iters < self.n_policy_iters:
+            return
 
-            with th.no_grad():
-                start_idx = 0
-                while start_idx < len(indices):
-                    if self.use_sde:
-                        self.policy.reset_noise(self.batch_size)
+        indices = np.arange(self.rollout_buffer.buffer_size
+                            * self.rollout_buffer.n_envs)
+        # In the paper, these are re-calculated after updating the policy
+        old_pds = np.empty(self.rollout_buffer.observations.shape[0],
+                           dtype=object)
 
-                    batch_indices = indices[
-                        start_idx:start_idx + self.aux_batch_size]
-                    obs = self.rollout_buffer.observations[batch_indices]
-                    # Convert to pytorch tensor
-                    obs_tensor = th.as_tensor(obs).to(self.policy.device)
-                    distribution, _, _ = self.policy.forward_policy(obs_tensor)
-                    old_pds[start_idx // self.aux_batch_size] = \
-                        distribution.distribution
-                    start_idx += self.aux_batch_size
+        with th.no_grad():
+            start_idx = 0
+            while start_idx < len(indices):
+                if self.use_sde:
+                    self.policy.reset_noise(self.batch_size)
 
-            unscaled_aux_losses = []
-            aux_losses = []
-            for aux_epoch in range(self.n_aux_epochs):
-                start_idx = 0
-                while start_idx < len(indices):
-                    if self.use_sde:
-                        self.policy.reset_noise(self.batch_size)
+                batch_indices = indices[
+                    start_idx:start_idx + self.aux_batch_size]
+                obs = self.rollout_buffer.observations[batch_indices]
+                # Convert to pytorch tensor
+                obs_tensor = th.as_tensor(obs).to(self.policy.device)
+                distribution, _, _ = self.policy.forward_policy(obs_tensor)
+                old_pds[start_idx // self.aux_batch_size] = \
+                    distribution.distribution
+                start_idx += self.aux_batch_size
 
-                    batch_indices = indices[
-                        start_idx:start_idx + self.aux_batch_size]
-                    obs = self.rollout_buffer.observations[batch_indices]
-                    obs_tensor = th.as_tensor(obs).to(self.policy.device)
-                    old_pds_batch = old_pds[start_idx // self.aux_batch_size]
+        unscaled_aux_losses = []
+        aux_losses = []
+        for aux_epoch in range(self.n_aux_epochs):
+            start_idx = 0
+            while start_idx < len(indices):
+                if self.use_sde:
+                    self.policy.reset_noise(self.batch_size)
 
-                    distribution, value, aux = self.policy.forward_aux(
-                        obs_tensor)
-                    vtarg = self.rollout_buffer.returns[batch_indices]
-                    vtarg = th.as_tensor(vtarg).to(self.policy.device)
+                batch_indices = indices[
+                    start_idx:start_idx + self.aux_batch_size]
+                obs = self.rollout_buffer.observations[batch_indices]
+                obs_tensor = th.as_tensor(obs).to(self.policy.device)
+                old_pds_batch = old_pds[start_idx // self.aux_batch_size]
 
-                    name2loss = {}
-                    name2loss["pol_distance"] = td.kl_divergence(
-                        old_pds_batch, distribution.distribution).mean()
-                    name2loss["vf_aux"] = 0.5 * F.mse_loss(aux, vtarg)
-                    name2loss["vf_true"] = 0.5 * F.mse_loss(value, vtarg)
+                distribution, value, aux = self.policy.forward_aux(
+                    obs_tensor)
+                vtarg = self.rollout_buffer.returns[batch_indices]
+                vtarg = th.as_tensor(vtarg).to(self.policy.device)
 
-                    unscaled_losses = {}
-                    losses = {}
-                    loss = 0
-                    for name in name2loss.keys():
-                        unscaled_loss = name2loss[name]
-                        coef = self._name2coef.get(name, 1)
+                name2loss = {}
+                name2loss["pol_distance"] = td.kl_divergence(
+                    old_pds_batch, distribution.distribution).mean()
+                name2loss["vf_aux"] = 0.5 * F.mse_loss(aux, vtarg)
+                name2loss["vf_true"] = 0.5 * F.mse_loss(value, vtarg)
 
-                        scaled_loss = unscaled_loss * coef
-                        unscaled_losses[name] = \
-                            unscaled_loss.detach().cpu().numpy()
-                        losses[name] = scaled_loss.detach().cpu().numpy()
-                        loss += scaled_loss
-                    unscaled_aux_losses.append(unscaled_losses)
-                    aux_losses.append(losses)
+                unscaled_losses = {}
+                losses = {}
+                loss = 0
+                for name in name2loss.keys():
+                    unscaled_loss = name2loss[name]
+                    coef = self._name2coef.get(name, 1)
 
-                    self.policy.aux_optimizer.zero_grad()
-                    loss.backward()
-                    # Clip grad norm
-                    th.nn.utils.clip_grad_norm_(self.policy.parameters(),
-                                                self.max_grad_norm)
-                    self.policy.aux_optimizer.step()
-                    start_idx += self.aux_batch_size
+                    scaled_loss = unscaled_loss * coef
+                    unscaled_losses[name] = \
+                        unscaled_loss.detach().cpu().numpy()
+                    losses[name] = scaled_loss.detach().cpu().numpy()
+                    loss += scaled_loss
+                unscaled_aux_losses.append(unscaled_losses)
+                aux_losses.append(losses)
 
-            self._n_aux_updates += self.n_aux_epochs
-            logger.record("train/n_aux_updates", self._n_aux_updates,
-                          exclude="tensorboard")
-            for name in name2loss.keys():
-                logger.record(f"train/unscaled_aux_{name}_loss", np.mean(
-                    [entry[name] for entry in unscaled_aux_losses]))
-                logger.record(f"train/aux_{name}_loss", np.mean(
-                    [entry[name] for entry in aux_losses]))
+                self.policy.aux_optimizer.zero_grad()
+                loss.backward()
+                # Clip grad norm
+                th.nn.utils.clip_grad_norm_(self.policy.parameters(),
+                                            self.max_grad_norm)
+                self.policy.aux_optimizer.step()
+                start_idx += self.aux_batch_size
+
+        self._n_aux_updates += self.n_aux_epochs
+        self._curr_n_policy_iters = 0
+
+        logger.record("train/n_aux_updates", self._n_aux_updates,
+                      exclude="tensorboard")
+        for name in name2loss.keys():
+            logger.record(f"train/unscaled_aux_{name}_loss", np.mean(
+                [entry[name] for entry in unscaled_aux_losses]))
+            logger.record(f"train/aux_{name}_loss", np.mean(
+                [entry[name] for entry in aux_losses]))
 
     def learn(
         self,
