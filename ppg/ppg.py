@@ -227,6 +227,15 @@ class PPG(PPO):
             self.policy.aux_optimizer,
             self.aux_lr_schedule(self._current_progress_remaining))
 
+    def _excluded_save_params(self) -> List[str]:
+        exclude = super(PPG, self)._excluded_save_params()
+        exclude.extend([
+            "_curr_n_policy_iters",
+            "_observations_buffer",
+            "_returns_buffer",
+        ])
+        return exclude
+
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts, var_list = super(PPG, self)._get_torch_save_params()
         state_dicts.append("policy.aux_optimizer")
