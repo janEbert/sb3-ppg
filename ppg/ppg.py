@@ -175,16 +175,6 @@ class PPG(PPO):
         if _init_setup_model:
             self._setup_model()
 
-        buffer_size = self.n_steps * self.n_envs * self.n_policy_iters
-        self._observations_buffer = np.empty_like(
-            self.rollout_buffer.observations,
-            shape=(buffer_size,) + self.rollout_buffer.obs_shape,
-        )
-        self._returns_buffer = np.empty_like(
-            self.rollout_buffer.returns,
-            shape=(buffer_size, 1),
-        )
-
     def _set_paper_parameters(self):
         if self.env.num_envs != 64:
             print("Warning: Paper uses 64 environments. "
@@ -215,6 +205,16 @@ class PPG(PPO):
         self.policy_kwargs["aux_lr_schedule"] = self.aux_lr_schedule
 
         super(PPG, self)._setup_model()
+
+        buffer_size = self.n_steps * self.n_envs * self.n_policy_iters
+        self._observations_buffer = np.empty_like(
+            self.rollout_buffer.observations,
+            shape=(buffer_size,) + self.rollout_buffer.obs_shape,
+        )
+        self._returns_buffer = np.empty_like(
+            self.rollout_buffer.returns,
+            shape=(buffer_size, 1),
+        )
 
     def _update_learning_rate(
             self,
