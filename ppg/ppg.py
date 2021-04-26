@@ -175,6 +175,16 @@ class PPG(PPO):
         if _init_setup_model:
             self._setup_model()
 
+        buffer_size = self.n_steps * self.n_envs * self.n_policy_iters
+        self.observations_buffer = np.empty_like(
+            self.rollout_buffer.observations,
+            shape=(buffer_size,) + self.rollout_buffer.obs_shape,
+        )
+        self.returns_buffer = np.empty_like(
+            self.rollout_buffer.returns,
+            shape=(buffer_size, 1),
+        )
+
     def _set_paper_parameters(self):
         if self.env.num_envs != 64:
             print("Warning: Paper uses 64 environments. "
@@ -228,25 +238,32 @@ class PPG(PPO):
         """
         super(PPG, self).train()
 
+        buffer_index_start = \
+            self._curr_n_policy_iters * len(self.rollout_buffer.observations)
+        buffer_index_end = \
+            buffer_index_start + len(self.rollout_buffer.observations)
+        self.observations_buffer[buffer_index_start:buffer_index_end] = \
+            self.rollout_buffer.observations
+        self.returns_buffer[buffer_index_start:buffer_index_end] = \
+            self.rollout_buffer.returns
+
         self._curr_n_policy_iters += 1
         if self._curr_n_policy_iters < self.n_policy_iters:
             return
 
-        indices = np.arange(self.rollout_buffer.buffer_size
-                            * self.rollout_buffer.n_envs)
+        indices = np.arange(len(self.observations_buffer))
         # In the paper, these are re-calculated after updating the policy
-        old_pds = np.empty(self.rollout_buffer.observations.shape[0],
-                           dtype=object)
+        old_pds = np.empty(len(self.observations_buffer), dtype=object)
 
         with th.no_grad():
             start_idx = 0
             while start_idx < len(indices):
                 if self.use_sde:
-                    self.policy.reset_noise(self.batch_size)
+                    self.policy.reset_noise(self.aux_batch_size)
 
                 batch_indices = indices[
                     start_idx:start_idx + self.aux_batch_size]
-                obs = self.rollout_buffer.observations[batch_indices]
+                obs = self.observations_buffer[batch_indices]
                 # Convert to pytorch tensor
                 obs_tensor = th.as_tensor(obs).to(self.policy.device)
                 distribution, _, _ = self.policy.forward_policy(obs_tensor)
@@ -260,17 +277,17 @@ class PPG(PPO):
             start_idx = 0
             while start_idx < len(indices):
                 if self.use_sde:
-                    self.policy.reset_noise(self.batch_size)
+                    self.policy.reset_noise(self.aux_batch_size)
 
                 batch_indices = indices[
                     start_idx:start_idx + self.aux_batch_size]
-                obs = self.rollout_buffer.observations[batch_indices]
+                obs = self.observations_buffer[batch_indices]
                 obs_tensor = th.as_tensor(obs).to(self.policy.device)
                 old_pds_batch = old_pds[start_idx // self.aux_batch_size]
 
                 distribution, value, aux = self.policy.forward_aux(
                     obs_tensor)
-                vtarg = self.rollout_buffer.returns[batch_indices]
+                vtarg = self.returns_buffer[batch_indices]
                 vtarg = th.as_tensor(vtarg).to(self.policy.device)
 
                 name2loss = {}
