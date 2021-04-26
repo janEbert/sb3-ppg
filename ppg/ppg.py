@@ -176,11 +176,11 @@ class PPG(PPO):
             self._setup_model()
 
         buffer_size = self.n_steps * self.n_envs * self.n_policy_iters
-        self.observations_buffer = np.empty_like(
+        self._observations_buffer = np.empty_like(
             self.rollout_buffer.observations,
             shape=(buffer_size,) + self.rollout_buffer.obs_shape,
         )
-        self.returns_buffer = np.empty_like(
+        self._returns_buffer = np.empty_like(
             self.rollout_buffer.returns,
             shape=(buffer_size, 1),
         )
@@ -242,18 +242,18 @@ class PPG(PPO):
             self._curr_n_policy_iters * len(self.rollout_buffer.observations)
         buffer_index_end = \
             buffer_index_start + len(self.rollout_buffer.observations)
-        self.observations_buffer[buffer_index_start:buffer_index_end] = \
+        self._observations_buffer[buffer_index_start:buffer_index_end] = \
             self.rollout_buffer.observations
-        self.returns_buffer[buffer_index_start:buffer_index_end] = \
+        self._returns_buffer[buffer_index_start:buffer_index_end] = \
             self.rollout_buffer.returns
 
         self._curr_n_policy_iters += 1
         if self._curr_n_policy_iters < self.n_policy_iters:
             return
 
-        indices = np.arange(len(self.observations_buffer))
+        indices = np.arange(len(self._observations_buffer))
         # In the paper, these are re-calculated after updating the policy
-        old_pds = np.empty(len(self.observations_buffer), dtype=object)
+        old_pds = np.empty(len(self._observations_buffer), dtype=object)
 
         with th.no_grad():
             start_idx = 0
@@ -263,7 +263,7 @@ class PPG(PPO):
 
                 batch_indices = indices[
                     start_idx:start_idx + self.aux_batch_size]
-                obs = self.observations_buffer[batch_indices]
+                obs = self._observations_buffer[batch_indices]
                 # Convert to pytorch tensor
                 obs_tensor = th.as_tensor(obs).to(self.policy.device)
                 distribution, _, _ = self.policy.forward_policy(obs_tensor)
@@ -281,13 +281,13 @@ class PPG(PPO):
 
                 batch_indices = indices[
                     start_idx:start_idx + self.aux_batch_size]
-                obs = self.observations_buffer[batch_indices]
+                obs = self._observations_buffer[batch_indices]
                 obs_tensor = th.as_tensor(obs).to(self.policy.device)
                 old_pds_batch = old_pds[start_idx // self.aux_batch_size]
 
                 distribution, value, aux = self.policy.forward_aux(
                     obs_tensor)
-                vtarg = self.returns_buffer[batch_indices]
+                vtarg = self._returns_buffer[batch_indices]
                 vtarg = th.as_tensor(vtarg).to(self.policy.device)
 
                 name2loss = {}
